@@ -1,7 +1,12 @@
 package ms.imf.buttersmallknife.compiler;
 
 import com.google.auto.service.AutoService;
+import com.squareup.javapoet.JavaFile;
+import com.squareup.javapoet.MethodSpec;
+import com.squareup.javapoet.TypeName;
+import com.squareup.javapoet.TypeSpec;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -46,6 +51,82 @@ public class ButterSmallKnifeAnnotationProcessor extends AbstractProcessor {
     @Override
     public boolean process(Set<? extends TypeElement> set, RoundEnvironment roundEnvironment) {
 
+        Map<DeclaredType, List<VariableElement>> typesFieldsMap = getBindTypesFieldsMap(roundEnvironment);
+
+        for (Map.Entry<DeclaredType, List<VariableElement>> entry : typesFieldsMap.entrySet()) {
+            DeclaredType type = entry.getKey();
+            List<VariableElement> fields = entry.getValue();
+
+            JavaFile javaFile = generateJavaFile(type, fields);
+            try {
+                javaFile.writeTo(processingEnv.getFiler());
+            } catch (IOException e) {
+                throw new RuntimeException("unexpected exception '" + e.getMessage() + "'", e);
+            }
+        }
+
+        return true;
+    }
+
+    private JavaFile generateJavaFile(DeclaredType type, List<VariableElement> fields) {
+
+        MethodSpec.Builder methodBuilder = MethodSpec.methodBuilder("bind")
+                .addModifiers(Modifier.STATIC)
+                .addParameter(TypeName.get(type), "activity");
+
+        for (VariableElement field : fields) {
+
+            Bind bindAnnotation = field.getAnnotation(Bind.class);
+
+            String typeFullName = ((TypeElement) type.asElement()).getQualifiedName().toString();
+            String fieldFullName = ((TypeElement) type.asElement()).getQualifiedName().toString() + '.' + field.getSimpleName();
+
+            methodBuilder
+                    .beginControlFlow("try")
+                    .addStatement("activity.$L = activity.findViewById($L)", field.getSimpleName(), bindAnnotation.value())
+                    .endControlFlow()
+                    .beginControlFlow("catch ($T e)", ClassCastException.class)
+                    .addStatement("throw new $T($S + e.getMessage(), e)",
+                            IllegalStateException.class,
+                            String.format(
+                                    "%s's type is %s, but happened ClassCastException from resource id '0x%x': ",
+                                    fieldFullName,
+                                    field.asType(),
+                                    bindAnnotation.value()
+                            )
+                    )
+                    .endControlFlow()
+                    .beginControlFlow("if (activity.$L == null)", field.getSimpleName())
+                    .addStatement(
+                            "throw new $T($S)",
+                            IllegalStateException.class,
+                            String.format(
+                                    "in %s can't find view from resource id '0x%x' for field '%s'",
+                                    typeFullName,
+                                    bindAnnotation.value(),
+                                    field.getSimpleName()
+                            )
+                    )
+                    .endControlFlow();
+        }
+
+        TypeSpec typeSpec = TypeSpec
+                .classBuilder(type.asElement().getSimpleName() + "_Bind")
+                .addMethod(
+                        methodBuilder.build()
+                )
+                .build();
+        String packageName = processingEnv.getElementUtils().getPackageOf(type.asElement()).getQualifiedName().toString();
+
+        return JavaFile
+                .builder(
+                        packageName,
+                        typeSpec
+                )
+                .build();
+    }
+
+    private Map<DeclaredType, List<VariableElement>> getBindTypesFieldsMap(RoundEnvironment roundEnvironment) {
         Map<DeclaredType, List<VariableElement>> typesFieldsMap = new HashMap<>();
 
         for (VariableElement variableElement : ElementFilter.fieldsIn(roundEnvironment.getElementsAnnotatedWith(Bind.class))) {
@@ -58,19 +139,21 @@ public class ButterSmallKnifeAnnotationProcessor extends AbstractProcessor {
                 printErrorMessage(
                         variableElement,
                         "type must be " + TYPE_ANDROID_VIEW,
-                        variableElement.getEnclosingElement().getSimpleName().toString()
+                        variableElement.asType().toString()
                 );
-                return false;
             }
 
             if (variableElement.getModifiers().contains(Modifier.PRIVATE)) {
                 printErrorMessage(variableElement, "permission modifier must more than private", "private");
-                return false;
             }
 
             if (variableElement.getModifiers().contains(Modifier.STATIC)) {
                 printErrorMessage(variableElement, "can't exist static modifier", "static");
-                return false;
+            }
+
+            if (variableElement.getConstantValue() != null) {
+                printErrorMessage(variableElement, variableElement.getConstantValue().toString(), variableElement.getConstantValue().toString());
+                printErrorMessage(variableElement, "can't exist default value", variableElement.getConstantValue().toString());
             }
 
             DeclaredType declaredType = (DeclaredType) variableElement.getEnclosingElement().asType();
@@ -81,14 +164,11 @@ public class ButterSmallKnifeAnnotationProcessor extends AbstractProcessor {
 
             fields.add(variableElement);
         }
-
-        processingEnv.getMessager().printMessage(Diagnostic.Kind.ERROR, typesFieldsMap.toString());
-
-        return true;
+        return typesFieldsMap;
     }
 
     private void printErrorMessage(VariableElement variableElement, String errorTip, String errorReason) {
-        processingEnv.getMessager().printMessage(Diagnostic.Kind.ERROR, String.format(
+        String errorMessage = String.format(
                 "@%s annotated field %s, but found %s in %s.%s.%s",
                 Bind.class.getSimpleName(),
                 errorTip,
@@ -96,7 +176,9 @@ public class ButterSmallKnifeAnnotationProcessor extends AbstractProcessor {
                 processingEnv.getElementUtils().getPackageOf(variableElement).getQualifiedName(),
                 variableElement.getEnclosingElement().getSimpleName(),
                 variableElement.getSimpleName()
-        ));
+        );
+        processingEnv.getMessager().printMessage(Diagnostic.Kind.ERROR, errorMessage);
+        throw new RuntimeException(errorMessage);
     }
 
 }
