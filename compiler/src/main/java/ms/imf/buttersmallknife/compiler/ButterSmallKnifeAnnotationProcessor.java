@@ -1,12 +1,16 @@
 package ms.imf.buttersmallknife.compiler;
 
 import com.google.auto.service.AutoService;
+import com.squareup.javapoet.ClassName;
+import com.squareup.javapoet.CodeBlock;
+import com.squareup.javapoet.FieldSpec;
 import com.squareup.javapoet.JavaFile;
 import com.squareup.javapoet.MethodSpec;
 import com.squareup.javapoet.TypeName;
 import com.squareup.javapoet.TypeSpec;
 
 import java.io.IOException;
+import java.lang.reflect.Constructor;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -53,6 +57,8 @@ public class ButterSmallKnifeAnnotationProcessor extends AbstractProcessor {
 
         Map<DeclaredType, List<VariableElement>> typesFieldsMap = getBindTypesFieldsMap(roundEnvironment);
 
+        CodeBlock.Builder bindersStoreCodeBlock = CodeBlock.builder().beginControlFlow("try");
+
         for (Map.Entry<DeclaredType, List<VariableElement>> entry : typesFieldsMap.entrySet()) {
             DeclaredType type = entry.getKey();
             List<VariableElement> fields = entry.getValue();
@@ -63,16 +69,86 @@ public class ButterSmallKnifeAnnotationProcessor extends AbstractProcessor {
             } catch (IOException e) {
                 throw new RuntimeException("unexpected exception '" + e.getMessage() + "'", e);
             }
+
+            bindersStoreCodeBlock.addStatement(
+                    "binders.put($T.class, $N.class.getConstructor($T.class, $T.class))",
+                    type,
+                    javaFile.typeSpec,
+                    type,
+                    TypeName.get(processingEnv.getElementUtils().getTypeElement(TYPE_ANDROID_VIEW).asType())
+            );
+        }
+
+        bindersStoreCodeBlock.endControlFlow()
+                .beginControlFlow("catch ($T e)", NoSuchMethodException.class)
+                .addStatement("throw new $T($S, e)", IllegalStateException.class, "will not run to here")
+                .endControlFlow();
+
+        try {
+            JavaFile
+                    .builder(
+                            "ms.imf.buttersmallknife",
+                            getHelperTypeSpec(bindersStoreCodeBlock, "ButterSmallKnife")
+                    )
+                    .build()
+                    .writeTo(processingEnv.getFiler());
+        } catch (IOException e) {
+            e.printStackTrace();
         }
 
         return true;
     }
 
+    private TypeSpec getHelperTypeSpec(CodeBlock.Builder bindersStoreCodeBlock, String typeName) {
+
+        // Map<Class<?>, Constructor<?>>
+        DeclaredType mapClassWConstructorWType = processingEnv.getTypeUtils().getDeclaredType(
+                processingEnv.getElementUtils().getTypeElement(Map.class.getCanonicalName()),
+                processingEnv.getTypeUtils().getDeclaredType(processingEnv.getElementUtils().getTypeElement(Class.class.getCanonicalName()), processingEnv.getTypeUtils().getWildcardType(null, null)),
+                processingEnv.getTypeUtils().getDeclaredType(processingEnv.getElementUtils().getTypeElement(Constructor.class.getCanonicalName()), processingEnv.getTypeUtils().getWildcardType(null, null))
+        );
+
+        return TypeSpec
+                .classBuilder(typeName)
+                .addModifiers(Modifier.PUBLIC, Modifier.FINAL)
+                .addStaticBlock(bindersStoreCodeBlock.build())
+                .addField(
+                        FieldSpec.builder(TypeName.get(mapClassWConstructorWType), "binders", Modifier.PRIVATE, Modifier.STATIC)
+                                .initializer("new $T<>()", HashMap.class)
+                                .build()
+                )
+                .addMethod(
+                        MethodSpec.methodBuilder("bind")
+                                .addModifiers(Modifier.PUBLIC, Modifier.STATIC)
+                                .addParameter(Object.class, "target")
+                                .addParameter(TypeName.get(processingEnv.getElementUtils().getTypeElement(TYPE_ANDROID_VIEW).asType()), "view")
+                                .beginControlFlow("if (target == null)")
+                                .addStatement("throw new $T($S)", NullPointerException.class, "target can't be null")
+                                .endControlFlow()
+                                .beginControlFlow("if (view == null)")
+                                .addStatement("throw new $T($S)", NullPointerException.class, "view can't be null")
+                                .endControlFlow()
+                                .addStatement("$T<?> constructor = binders.get(target.getClass())", Constructor.class)
+                                .beginControlFlow("if (constructor == null)")
+                                .addStatement("throw new $T($S + target.getClass().getCanonicalName())", IllegalStateException.class, "can't find binder in ")
+                                .endControlFlow()
+                                .beginControlFlow("try")
+                                .addStatement("constructor.newInstance(target, view)")
+                                .endControlFlow()
+                                .beginControlFlow("catch ($T e)", Exception.class)
+                                .addStatement("throw new $T($S + constructor.getDeclaringClass().getCanonicalName(), e)", IllegalStateException.class, "can't invoke binder constructor ")
+                                .endControlFlow()
+                                .build()
+                )
+                .build();
+    }
+
     private JavaFile generateJavaFile(DeclaredType type, List<VariableElement> fields) {
 
-        MethodSpec.Builder methodBuilder = MethodSpec.methodBuilder("bind")
-                .addModifiers(Modifier.STATIC)
-                .addParameter(TypeName.get(type), "activity");
+        MethodSpec.Builder methodBuilder = MethodSpec.constructorBuilder()
+                .addAnnotation(ClassName.get(processingEnv.getElementUtils().getTypeElement("android.support.annotation.Keep")))
+                .addParameter(TypeName.get(type), "target")
+                .addParameter(TypeName.get(processingEnv.getElementUtils().getTypeElement(TYPE_ANDROID_VIEW).asType()), "view");
 
         for (VariableElement field : fields) {
 
@@ -83,7 +159,7 @@ public class ButterSmallKnifeAnnotationProcessor extends AbstractProcessor {
 
             methodBuilder
                     .beginControlFlow("try")
-                    .addStatement("activity.$L = activity.findViewById($L)", field.getSimpleName(), bindAnnotation.value())
+                    .addStatement("target.$L = view.findViewById($L)", field.getSimpleName(), bindAnnotation.value())
                     .endControlFlow()
                     .beginControlFlow("catch ($T e)", ClassCastException.class)
                     .addStatement("throw new $T($S + e.getMessage(), e)",
@@ -96,7 +172,7 @@ public class ButterSmallKnifeAnnotationProcessor extends AbstractProcessor {
                             )
                     )
                     .endControlFlow()
-                    .beginControlFlow("if (activity.$L == null)", field.getSimpleName())
+                    .beginControlFlow("if (target.$L == null)", field.getSimpleName())
                     .addStatement(
                             "throw new $T($S)",
                             IllegalStateException.class,

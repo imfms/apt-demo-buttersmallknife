@@ -8,12 +8,10 @@ import android.widget.Toast;
 
 import ms.imf.buttersmallknife.annotation.Bind;
 
-public class MainActivity extends AppCompatActivity {
+public class SecondActivity extends AppCompatActivity {
 
     @Bind(R.id.tvHelloWorld)
     TextView tvHelloWorld;
-    @Bind(R.id.tvHelloWorld)
-    View asdf;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -25,7 +23,7 @@ public class MainActivity extends AppCompatActivity {
         tvHelloWorld.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                Toast.makeText(MainActivity.this, "success", Toast.LENGTH_SHORT).show();
+                Toast.makeText(SecondActivity.this, "success", Toast.LENGTH_SHORT).show();
             }
         });
     }
